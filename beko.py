@@ -19,7 +19,6 @@ def to_str(x) -> str:
     """Normalize IDs to comparable strings (handles numbers stored as text and vice versa)."""
     if pd.isna(x):
         return ""
-    # If it's a float like 12345.0, remove .0
     if isinstance(x, (int, np.integer)):
         return str(int(x)).strip()
     if isinstance(x, float) and x.is_integer():
@@ -73,8 +72,7 @@ def excel_weeknum_sunday(date_val):
     Excel WEEKNUM(date,1) equivalent:
     - Weeks start on Sunday
     - Week 1 is the week containing Jan 1
-    Python equivalent: strftime('%U') is week number of year with Sunday as first day, week 0 before first Sunday.
-    Excel's Week 1 maps to %U + 1.
+    Python: %U is week number (Sunday start), week 0 before first Sunday -> add 1.
     """
     if pd.isna(date_val):
         return ""
@@ -88,19 +86,17 @@ def build_rca_lookup(map_df: pd.DataFrame) -> dict:
     Mapping key = Bill Of Lading if present else Order Number (as strings).
     Value = Root Cause Error (string).
     """
-    # Expect these columns in mapping file:
-    # "Bill Of Lading", "Order Number", "Root Cause Error"
     required = ["Bill Of Lading", "Order Number", "Root Cause Error"]
     missing = [c for c in required if c not in map_df.columns]
     if missing:
         raise ValueError(f"Mapping file missing columns: {missing}")
 
-    key_series = map_df["Bill Of Lading"].apply(to_str)
-    fallback_series = map_df["Order Number"].apply(to_str)
-    lookup_key = np.where(key_series != "", key_series, fallback_series)
+    bol = map_df["Bill Of Lading"].apply(to_str)
+    on = map_df["Order Number"].apply(to_str)
+    key = np.where(bol != "", bol, on)
 
     values = map_df["Root Cause Error"].apply(to_str).values
-    return dict(zip(lookup_key, values))
+    return dict(zip(key, values))
 
 def reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Reorder to your final layout; create missing columns as blank."""
@@ -118,18 +114,14 @@ def reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
         "Latency Updates Received","Latency Updates Passed","Shipment Latency Percentage",
         "Average Latency (min)","Period Date","Ping Interval (min)","Shipment Type",
         "Attr1 Value","Attr2 Name","Attr2 Value","Attr3 Name","Attr3 Value",
-        "Attr4 Name","Attr4 Value","Attr5 Name","Attr5 Value",
-        # Optional: keep RCA final too, if you use it instead of RCA Reason:
-        "RCA"
+        "Attr4 Name","Attr4 Value","Attr5 Name","Attr5 Value"
     ]
 
     for c in desired_cols:
         if c not in df.columns:
             df[c] = ""
 
-    # Keep only desired columns that exist in df (and in the order list)
-    out = df[[c for c in desired_cols if c in df.columns]].copy()
-    return out
+    return df[desired_cols].copy()
 
 def to_excel_bytes(df: pd.DataFrame, sheet_name="Report") -> bytes:
     output = BytesIO()
@@ -149,7 +141,6 @@ if base_file and rca_file:
         if "Unnamed: 0" in base_df.columns and "Sl. No" not in base_df.columns:
             base_df.rename(columns={"Unnamed: 0": "Sl. No"}, inplace=True)
 
-        # Ensure key raw columns exist
         required_base = ["Order Number", "Bill of Lading", "Tracked", "Tracking Type", "Created Timestamp Date"]
         missing_base = [c for c in required_base if c not in base_df.columns]
         if missing_base:
@@ -172,38 +163,32 @@ if base_file and rca_file:
         # IsTracked
         base_df["IsTracked"] = np.where(base_df["Tracked Shipments"] == "Tracked", 1, 0)
 
-        # Week derived from Created Timestamp Date using Sunday week logic
+        # Week derived from Created Timestamp Date
         base_df["Week"] = base_df["Created Timestamp Date"].apply(excel_weeknum_sunday)
 
-        # Add RCA Reason blank column (as requested earlier)
+        # Ensure RCA Reason exists
         if "RCA Reason" not in base_df.columns:
             base_df["RCA Reason"] = ""
 
-        # Build lookup and fill RCA for blanks only
+        # Build RCA lookup and fill ONLY blanks in RCA Reason
         lookup = build_rca_lookup(map_df)
 
-        # Ensure RCA column exists
-        if "RCA" not in base_df.columns:
-            base_df["RCA"] = ""
-
-        # First: fill blank RCA using mapping file
-        def fill_rca(row):
-            # Keep non-blank RCA as-is
-            if to_str(row.get("RCA")) != "":
-                return row["RCA"]
-            # Fill from mapping using Shipment ID
+        def fill_rca_reason(row):
+            current = to_str(row.get("RCA Reason"))
+            if current != "":
+                return row["RCA Reason"]
             sid = to_str(row.get("Shipment ID"))
             return lookup.get(sid, "")
 
-        base_df["RCA"] = base_df.apply(fill_rca, axis=1)
+        base_df["RCA Reason"] = base_df.apply(fill_rca_reason, axis=1)
 
-        # Second: enforce your rule (Tracked/YMS => RCA="Tracked")
-        base_df.loc[base_df["Tracked Shipments"].isin(["Tracked", "YMS Milestone"]), "RCA"] = "Tracked"
+        # Override rule: Tracked or YMS Milestone => RCA Reason = "Tracked"
+        base_df.loc[base_df["Tracked Shipments"].isin(["Tracked", "YMS Milestone"]), "RCA Reason"] = "Tracked"
 
         # Reorder columns to final layout
         final_df = reorder_columns(base_df)
 
-        # Show preview
+        # Preview
         st.subheader("Preview (first 50 rows)")
         st.dataframe(final_df.head(50), use_container_width=True)
 
@@ -216,9 +201,9 @@ if base_file and rca_file:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-        # Extra: quick stats
+        # Quick checks
         st.subheader("Quick checks")
-        st.write("Blank RCA count:", int((final_df["RCA"].apply(to_str) == "").sum()) if "RCA" in final_df.columns else "N/A")
+        st.write("Blank RCA Reason count:", int((final_df["RCA Reason"].apply(to_str) == "").sum()))
         st.write("Tracked/YMS count:", int(final_df["Tracked Shipments"].isin(["Tracked", "YMS Milestone"]).sum()))
 
     except Exception as e:

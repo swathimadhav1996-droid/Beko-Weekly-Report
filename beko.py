@@ -4,19 +4,15 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 
-st.set_page_config(page_title="Carrier Data Quality Builder", layout="wide")
+st.set_page_config(page_title="Raw File Enricher", layout="wide")
+st.title("Raw File Enricher (No Shipment Type)")
 
-st.title("Carrier Data Quality Report Builder")
-st.write("Upload the base **Data Quality by Carrier** file and the **RCA mapping** file to generate the final report.")
+raw_file = st.file_uploader("Upload Raw File (Data Quality by Carrier)", type=["xlsx"])
 
-base_file = st.file_uploader("Upload: Data Quality by Carrier (base file)", type=["xlsx"])
-rca_file = st.file_uploader("Upload: RCA mapping file (truckload_shipments_*.xlsx)", type=["xlsx"])
-
-# --------------------------
+# -----------------------
 # Helpers
-# --------------------------
+# -----------------------
 def to_str(x) -> str:
-    """Normalize IDs to comparable strings (handles numbers stored as text and vice versa)."""
     if pd.isna(x):
         return ""
     if isinstance(x, (int, np.integer)):
@@ -25,188 +21,180 @@ def to_str(x) -> str:
         return str(int(x)).strip()
     return str(x).strip()
 
+def normalize_bool_to_01(val):
+    """Convert True/False-ish values to 1/0, else NaN."""
+    if pd.isna(val):
+        return np.nan
+    if isinstance(val, bool):
+        return 1 if val else 0
+    s = to_str(val).upper()
+    if s in ["TRUE", "T", "YES", "Y", "1"]:
+        return 1
+    if s in ["FALSE", "F", "NO", "N", "0"]:
+        return 0
+    return np.nan
+
 def derive_shipment_id(order_number, bill_of_lading):
     """Shipment ID = Order Number if not blank else Bill of Lading."""
     on = to_str(order_number)
     bol = to_str(bill_of_lading)
     return on if on != "" else bol
 
-def normalize_tracking_type(tracking_type):
-    return to_str(tracking_type).upper()
-
-def normalize_bool(val):
-    """Return True/False/None from various excel representations."""
-    if pd.isna(val):
-        return None
-    if isinstance(val, bool):
-        return val
-    s = to_str(val).upper()
-    if s in ["TRUE", "T", "YES", "Y", "1"]:
-        return True
-    if s in ["FALSE", "F", "NO", "N", "0"]:
-        return False
-    return None
-
-def derive_tracked_shipments(tracked_val, tracking_type):
+def derive_tracked_shipments(is_tracked_01, tracking_type):
     """
     Rules:
-      - If Tracking Type in {ELD, APP, DIRECT}: True->Tracked, False->Untracked
-      - If Tracking Type == UNKNOWN: True->YMS Milestone, False->Untracked
-      - Otherwise: fallback True->Tracked, False->Untracked
+      - Tracking Type in {ELD, APP, DIRECT}
+          IsTracked=1 -> Tracked
+          IsTracked=0 -> Untracked
+      - Tracking Type == Unknown
+          IsTracked=1 -> YMS Milestone
+          IsTracked=0 -> Untracked
     """
-    tt = normalize_tracking_type(tracking_type)
-    trb = normalize_bool(tracked_val)
+    tt = to_str(tracking_type).upper()
+    it = None if pd.isna(is_tracked_01) else int(is_tracked_01)
 
     if tt in ["ELD", "APP", "DIRECT"]:
-        return "Tracked" if trb is True else ("Untracked" if trb is False else "")
+        if it == 1:
+            return "Tracked"
+        if it == 0:
+            return "Untracked"
+        return ""
     if tt == "UNKNOWN":
-        return "YMS Milestone" if trb is True else ("Untracked" if trb is False else "")
-    if trb is True:
+        if it == 1:
+            return "YMS Milestone"
+        if it == 0:
+            return "Untracked"
+        return ""
+
+    # Fallback (if Tracking Type is something else)
+    if it == 1:
         return "Tracked"
-    if trb is False:
+    if it == 0:
         return "Untracked"
     return ""
 
-def excel_weeknum_sunday(date_val):
+def first_datetime_from_window(window_val):
     """
-    Excel WEEKNUM(date,1) equivalent:
-    - Weeks start on Sunday
-    - Week 1 is the week containing Jan 1
-    Python: %U is week number (Sunday start), week 0 before first Sunday -> add 1.
+    Input examples:
+      '2025-11-05 10:00:00.000...2025-11-05 11:30:00.000'
+    We take the left side before '...'
     """
-    if pd.isna(date_val):
+    s = to_str(window_val)
+    if s == "":
+        return pd.NaT
+    left = s.split("...")[0].strip()
+    return pd.to_datetime(left, errors="coerce")
+
+def iso_week_label(dt_val):
+    """
+    ISO week numbering (Mon–Sun) matching your screenshots:
+      Week 40 = Sep 29 2025 to Oct 5 2025
+      Week 01 (2026) = Dec 29 2025 to Jan 4 2026
+    """
+    if pd.isna(dt_val):
         return ""
-    d = pd.to_datetime(date_val, errors="coerce")
+    d = pd.to_datetime(dt_val, errors="coerce")
     if pd.isna(d):
         return ""
-    return f"Week {int(d.strftime('%U')) + 1}"
+    wk = int(d.isocalendar().week)
+    return f"Week {wk:02d}"
 
-def build_rca_lookup(map_df: pd.DataFrame) -> dict:
-    """
-    Mapping key = Bill Of Lading if present else Order Number (as strings).
-    Value = Root Cause Error (string).
-    """
-    required = ["Bill Of Lading", "Order Number", "Root Cause Error"]
-    missing = [c for c in required if c not in map_df.columns]
+def to_excel_bytes(df: pd.DataFrame, sheet_name="Raw File") -> bytes:
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    return bio.getvalue()
+
+# -----------------------
+# Main
+# -----------------------
+if raw_file:
+    df = pd.read_excel(raw_file)
+
+    # Pickup window column name can vary; support common variants
+    pickup_window_candidates = [
+        "Pickup Appointement Window (UTC)",   # (as in your output list)
+        "Pickup Appointment Window (UTC)",    # common spelling
+        "Pickup Appointment Window (UTC) ",   # trailing space
+    ]
+    pickup_col = next((c for c in pickup_window_candidates if c in df.columns), None)
+
+    # Required input columns
+    required = ["Order Number", "Bill of Lading", "Tracked", "Tracking Type"]
+    missing = [c for c in required if c not in df.columns]
     if missing:
-        raise ValueError(f"Mapping file missing columns: {missing}")
+        st.error(f"Raw file missing required columns: {missing}")
+        st.stop()
+    if pickup_col is None:
+        st.error("Could not find Pickup Appointment Window column. Expected one of: "
+                 + ", ".join(pickup_window_candidates))
+        st.stop()
 
-    bol = map_df["Bill Of Lading"].apply(to_str)
-    on = map_df["Order Number"].apply(to_str)
-    key = np.where(bol != "", bol, on)
+    # ---- Create derived columns ----
+    df["Shipment ID"] = [
+        derive_shipment_id(on, bol) for on, bol in zip(df["Order Number"], df["Bill of Lading"])
+    ]
+    df["IsTracked"] = df["Tracked"].apply(normalize_bool_to_01)
+    df["Tracked Shipments"] = [
+        derive_tracked_shipments(it, tt) for it, tt in zip(df["IsTracked"], df["Tracking Type"])
+    ]
+    df["Tracking field"] = df["Tracking Type"].apply(to_str) + " - " + df["Tracked Shipments"].apply(to_str)
 
-    values = map_df["Root Cause Error"].apply(to_str).values
-    return dict(zip(key, values))
+    # Week from the first timestamp in Pickup Appointment Window
+    pickup_start_dt = df[pickup_col].apply(first_datetime_from_window)
+    df["Week"] = pickup_start_dt.apply(iso_week_label)
 
-def reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Reorder to your final layout; create missing columns as blank."""
+    # Tracking Error update
+    if "Tracking Error" not in df.columns:
+        df["Tracking Error"] = ""
+    mask_tracked_like = df["Tracked Shipments"].isin(["Tracked", "YMS Milestone"])
+    df.loc[mask_tracked_like, "Tracking Error"] = "Tracked"
+
+    # Ensure output uses the exact requested header spelling
+    if "Pickup Appointement Window (UTC)" not in df.columns:
+        df["Pickup Appointement Window (UTC)"] = df[pickup_col]
+
+    # ---- Final output columns (Shipment Type REMOVED) ----
     desired_cols = [
-        "Sl. No","Tenant Name","Carrier Name","Carrier Identifier Selection","SCAC",
-        "Bill of Lading","Order Number","Shipment ID","RCA Reason","Tracked Shipments",
-        "Tracking Type","Tracking field","Tracking Method","IsTracked",
-        "Active Equipment ID","Historical Equipment ID",
-        "Pickup Name","Pickup City State","Pickup Country","Pickup Region",
-        "Dropoff Name","Dropoff City State","Dropoff Country","Dropoff Country Region",
-        "Final Status Reason","Week","Created Timestamp Date",
-        "Pickup Arrival Utc Timestamp Raw","Pickup Departure Utc Timestamp Raw",
-        "Dropoff Arrival Utc Timestamp Raw","Dropoff Departure Utc Timestamp Raw",
-        "Nb Milestones Expected","Nb Milestones Received","Milestones Achieved Percentage",
-        "Latency Updates Received","Latency Updates Passed","Shipment Latency Percentage",
-        "Average Latency (min)","Period Date","Ping Interval (min)","Shipment Type",
+        "Sl. No","Tenant Name","Tenant ID","Carrier Name","P44 CARRIER ID","P44 Shipment ID",
+        "Bill of Lading","Order Number","Shipment ID","IsTracked","Tracked Shipments",
+        "Tracking Type","Tracking field","Tracking Method","Active Equipment ID","Historical Equipment ID",
+        "Pickup Name","Pickup City State","Pickup Country","Pickup Region","Week",
+        "Pickup Appointement Window (UTC)",
+        "Final Destination Name","Final Destination City State","Final Destination Country",
+        "Delivery Appointement Window (UTC)",
+        "Shipment Created (UTC)","Tracking Window Start (UTC)","Tracking Window End (UTC)",
+        "Pickup Arrival Milestone (UTC)","Pickup Departure Milestone (UTC)",
+        "Final Destination Arrival Milestone (UTC)","Final Destination Departure Milestone (UTC)",
+        "# Of Milestones received / # Of Milestones expected",
+        "# Updates Received","# Updates Received < 10 mins",
+        "Nb Intervals Expected","Nb Intervals Observed",
+        "Final Status Reason","Tracking Error",
+        "Milestone Error 1","Milestone Error 2","Milestone Error 3",
         "Attr1 Value","Attr2 Name","Attr2 Value","Attr3 Name","Attr3 Value",
-        "Attr4 Name","Attr4 Value","Attr5 Name","Attr5 Value"
+        "Attr4 Name","Attr4 Value","Attr5 Name","Attr5 Value",
+        "Average Latency (min)"
     ]
 
+    # Create missing columns as blanks (so output always matches the requested schema)
     for c in desired_cols:
         if c not in df.columns:
             df[c] = ""
 
-    return df[desired_cols].copy()
+    out_df = df[desired_cols].copy()
 
-def to_excel_bytes(df: pd.DataFrame, sheet_name="Report") -> bytes:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-    return output.getvalue()
+    st.subheader("Preview (first 50 rows)")
+    st.dataframe(out_df.head(50), use_container_width=True)
 
-# --------------------------
-# Main flow
-# --------------------------
-if base_file and rca_file:
-    try:
-        base_df = pd.read_excel(base_file)
-        map_df = pd.read_excel(rca_file)
+    st.download_button(
+        "Download Enriched Raw File (Reordered, No Shipment Type)",
+        data=to_excel_bytes(out_df, sheet_name="Raw File"),
+        file_name="Raw_File_Enriched_Reordered_No_Shipment_Type.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
-        # Normalize Sl. No column (sometimes comes as Unnamed: 0)
-        if "Unnamed: 0" in base_df.columns and "Sl. No" not in base_df.columns:
-            base_df.rename(columns={"Unnamed: 0": "Sl. No"}, inplace=True)
-
-        required_base = ["Order Number", "Bill of Lading", "Tracked", "Tracking Type", "Created Timestamp Date"]
-        missing_base = [c for c in required_base if c not in base_df.columns]
-        if missing_base:
-            st.error(f"Base file missing required columns: {missing_base}")
-            st.stop()
-
-        # Shipment ID
-        base_df["Shipment ID"] = [
-            derive_shipment_id(on, bol) for on, bol in zip(base_df["Order Number"], base_df["Bill of Lading"])
-        ]
-
-        # Tracked Shipments
-        base_df["Tracked Shipments"] = [
-            derive_tracked_shipments(tr, tt) for tr, tt in zip(base_df["Tracked"], base_df["Tracking Type"])
-        ]
-
-        # Tracking field
-        base_df["Tracking field"] = base_df["Tracking Type"].apply(to_str) + " - " + base_df["Tracked Shipments"].apply(to_str)
-
-        # IsTracked
-        base_df["IsTracked"] = np.where(base_df["Tracked Shipments"] == "Tracked", 1, 0)
-
-        # Week derived from Created Timestamp Date
-        base_df["Week"] = base_df["Created Timestamp Date"].apply(excel_weeknum_sunday)
-
-        # Ensure RCA Reason exists
-        if "RCA Reason" not in base_df.columns:
-            base_df["RCA Reason"] = ""
-
-        # Build RCA lookup and fill ONLY blanks in RCA Reason
-        lookup = build_rca_lookup(map_df)
-
-        def fill_rca_reason(row):
-            current = to_str(row.get("RCA Reason"))
-            if current != "":
-                return row["RCA Reason"]
-            sid = to_str(row.get("Shipment ID"))
-            return lookup.get(sid, "")
-
-        base_df["RCA Reason"] = base_df.apply(fill_rca_reason, axis=1)
-
-        # Override rule: Tracked or YMS Milestone => RCA Reason = "Tracked"
-        base_df.loc[base_df["Tracked Shipments"].isin(["Tracked", "YMS Milestone"]), "RCA Reason"] = "Tracked"
-
-        # Reorder columns to final layout
-        final_df = reorder_columns(base_df)
-
-        # Preview
-        st.subheader("Preview (first 50 rows)")
-        st.dataframe(final_df.head(50), use_container_width=True)
-
-        # Download
-        excel_bytes = to_excel_bytes(final_df, sheet_name="Data Quality")
-        st.download_button(
-            label="Download Final Excel",
-            data=excel_bytes,
-            file_name="Data_Quality_Final.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-        # Quick checks
-        st.subheader("Quick checks")
-        st.write("Blank RCA Reason count:", int((final_df["RCA Reason"].apply(to_str) == "").sum()))
-        st.write("Tracked/YMS count:", int(final_df["Tracked Shipments"].isin(["Tracked", "YMS Milestone"]).sum()))
-
-    except Exception as e:
-        st.error(f"Error processing files: {e}")
+    st.subheader("Quick checks")
+    st.write("Rows with Week blank:", int((out_df["Week"].apply(to_str) == "").sum()))
+    st.write("Rows where Tracking Error forced to 'Tracked':", int(mask_tracked_like.sum()))
 else:
-    st.info("Upload both files to generate the final report.")
+    st.info("Upload the Raw File to continue.")

@@ -21,6 +21,22 @@ def to_str(x) -> str:
         return str(int(x)).strip()
     return str(x).strip()
 
+def to_numeric(val):
+    """Force numeric (int) where possible, else NaN."""
+    if pd.isna(val):
+        return np.nan
+    try:
+        return int(float(val))
+    except Exception:
+        return np.nan
+
+def to_mmddyyyy(val):
+    """Convert to datetime and return normalized date (date-only)."""
+    if pd.isna(val):
+        return pd.NaT
+    d = pd.to_datetime(val, errors="coerce")
+    return d.normalize() if not pd.isna(d) else pd.NaT
+
 def normalize_bool_to_01(val):
     """Convert True/False-ish values to 1/0, else NaN."""
     if pd.isna(val):
@@ -101,7 +117,8 @@ def iso_week_label(dt_val):
 
 def to_excel_bytes(df: pd.DataFrame, sheet_name="Raw File") -> bytes:
     bio = BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+    # Ensure Excel date formatting mm/dd/yyyy
+    with pd.ExcelWriter(bio, engine="openpyxl", datetime_format="mm/dd/yyyy") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
     return bio.getvalue()
 
@@ -129,6 +146,22 @@ if raw_file:
         st.error("Could not find Pickup Appointment Window column. Expected one of: "
                  + ", ".join(pickup_window_candidates))
         st.stop()
+
+    # ---- Force numeric format for ID columns ----
+    numeric_cols = ["Tenant ID", "P44 CARRIER ID", "P44 Shipment ID"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = df[col].apply(to_numeric)
+
+    # ---- Force date columns to date-only (mm/dd/yyyy on export) ----
+    date_cols = [
+        "Shipment Created (UTC)",
+        "Tracking Window Start (UTC)",
+        "Tracking Window End (UTC)"
+    ]
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = df[col].apply(to_mmddyyyy)
 
     # ---- Create derived columns ----
     df["Shipment ID"] = [

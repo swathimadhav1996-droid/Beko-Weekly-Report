@@ -256,12 +256,12 @@ if raw_file:
     mask_tracked_like = df["Tracked Shipments"].isin(["Tracked", "YMS Milestone"])
     df.loc[mask_tracked_like, "Tracking Error"] = "Tracked"
 
-    # Map Tenant Name -> Customer Tenant Name for output col B
-    df["Customer Tenant Name"] = df["Tenant Name"] if "Tenant Name" in df.columns else ""
+    # Customer Tenant Name -> output as "Tenant Name"
+    df["Tenant Name"] = df["Tenant Name"] if "Tenant Name" in df.columns else ""
 
     # ---- Final output columns ----
     desired_cols = [
-        "Customer Tenant Name", "Carrier Name", "P44 CARRIER ID", "P44 Shipment ID",
+        "Tenant Name", "Carrier Name", "P44 CARRIER ID", "P44 Shipment ID",
         "Bill of Lading", "Order Number", "Shipment ID", "IsTracked", "Tracked", "Tracked Shipments",
         "Connection Type", "Tracking field", "Tracking Method", "Active Equipment ID", "Historical Equipment ID",
         "Pickup Name", "Pickup City State", "Pickup Country", "Pickup Region",

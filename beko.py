@@ -5,7 +5,7 @@ import numpy as np
 from io import BytesIO
 
 st.set_page_config(page_title="Raw File Enricher", layout="wide")
-st.title("Raw File Enricher (No Shipment Type)")
+st.title("Raw File Enricher")
 
 raw_file = st.file_uploader("Upload Raw File (Data Quality by Carrier)", type=["xlsx"])
 
@@ -82,12 +82,23 @@ def derive_tracked_shipments(is_tracked_01, tracking_type):
             return "Untracked"
         return ""
 
-    # Fallback (if Tracking Type is something else)
+    # Fallback
     if it == 1:
         return "Tracked"
     if it == 0:
         return "Untracked"
     return ""
+
+def derive_tracked_flag(tracking_field: str) -> int:
+    """
+    Column K - Tracked:
+      If Tracking field (col N) is one of:
+        'APP - Tracked', 'DIRECT - Tracked', 'ELD - Tracked'
+      -> 1, else -> 0
+    """
+    tf = to_str(tracking_field).strip()
+    tracked_values = {"APP - Tracked", "DIRECT - Tracked", "ELD - Tracked"}
+    return 1 if tf in tracked_values else 0
 
 def first_datetime_from_window(window_val):
     """
@@ -103,9 +114,8 @@ def first_datetime_from_window(window_val):
 
 def iso_week_label(dt_val):
     """
-    ISO week numbering (Mon–Sun) matching your screenshots:
-      Week 40 = Sep 29 2025 to Oct 5 2025
-      Week 01 (2026) = Dec 29 2025 to Jan 4 2026
+    ISO week numbering (Mon-Sun):
+      Returns 'Week XX' zero-padded.
     """
     if pd.isna(dt_val):
         return ""
@@ -115,12 +125,62 @@ def iso_week_label(dt_val):
     wk = int(d.isocalendar().week)
     return f"Week {wk:02d}"
 
+def iso_year(dt_val):
+    """
+    ISO year — matches ISO week (can differ from calendar year at year boundaries).
+    e.g. Dec 29 2025 belongs to ISO Week 01 of 2026.
+    """
+    if pd.isna(dt_val):
+        return np.nan
+    d = pd.to_datetime(dt_val, errors="coerce")
+    if pd.isna(d):
+        return np.nan
+    return int(d.isocalendar().year)
+
 def to_excel_bytes(df: pd.DataFrame, sheet_name="Raw File") -> bytes:
     bio = BytesIO()
-    # Ensure Excel date formatting mm/dd/yyyy
     with pd.ExcelWriter(bio, engine="openpyxl", datetime_format="mm/dd/yyyy") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
     return bio.getvalue()
+
+# -----------------------
+# Column name normalizer
+# Handles minor spelling/casing differences in input files
+# -----------------------
+COLUMN_ALIASES = {
+    "Tracking Type": [
+        "tracking type", "trackingtype", "tracking_type",
+        "type of tracking", "tracking  type"
+    ],
+    "Tracked": [
+        "tracked", "is tracked", "istracked", "is_tracked"
+    ],
+    "Order Number": [
+        "order number", "ordernumber", "order_number", "order no", "order no."
+    ],
+    "Bill of Lading": [
+        "bill of lading", "billoflading", "bill_of_lading", "bol"
+    ],
+    "Pickup Appointement Window (UTC)": [
+        "pickup appointement window (utc)",
+        "pickup appointment window (utc)",
+        "pickup appointment window (utc) ",
+        "pickup appointement window(utc)",
+    ],
+}
+
+def normalize_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    col_map = {c.strip().lower(): c for c in df.columns}
+    rename_map = {}
+    for canonical, aliases in COLUMN_ALIASES.items():
+        if canonical not in df.columns:
+            for alias in aliases:
+                if alias.lower() in col_map:
+                    rename_map[col_map[alias.lower()]] = canonical
+                    break
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    return df, rename_map
 
 # -----------------------
 # Main
@@ -128,23 +188,23 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="Raw File") -> bytes:
 if raw_file:
     df = pd.read_excel(raw_file)
 
-    # Pickup window column name can vary; support common variants
-    pickup_window_candidates = [
-        "Pickup Appointement Window (UTC)",   # (as in your output list)
-        "Pickup Appointment Window (UTC)",    # common spelling
-        "Pickup Appointment Window (UTC) ",   # trailing space
-    ]
-    pickup_col = next((c for c in pickup_window_candidates if c in df.columns), None)
+    # Normalize column names (handle spelling/casing variants)
+    df, renamed = normalize_columns(df)
+    if renamed:
+        st.info(f"Auto-renamed columns to match expected schema: {renamed}")
+
+    # Show actual columns for debugging (collapsible)
+    with st.expander("Columns detected in uploaded file"):
+        st.write(df.columns.tolist())
+
+    # Pickup window column (after normalization, should be canonical name)
+    pickup_col = "Pickup Appointement Window (UTC)"
 
     # Required input columns
-    required = ["Order Number", "Bill of Lading", "Tracked", "Tracking Type"]
+    required = ["Order Number", "Bill of Lading", "Tracked", "Tracking Type", pickup_col]
     missing = [c for c in required if c not in df.columns]
     if missing:
         st.error(f"Raw file missing required columns: {missing}")
-        st.stop()
-    if pickup_col is None:
-        st.error("Could not find Pickup Appointment Window column. Expected one of: "
-                 + ", ".join(pickup_window_candidates))
         st.stop()
 
     # ---- Force numeric format for ID columns ----
@@ -165,51 +225,61 @@ if raw_file:
 
     # ---- Create derived columns ----
     df["Shipment ID"] = [
-        derive_shipment_id(on, bol) for on, bol in zip(df["Order Number"], df["Bill of Lading"])
+        derive_shipment_id(on, bol)
+        for on, bol in zip(df["Order Number"], df["Bill of Lading"])
     ]
-    df["IsTracked"] = df["Tracked"].apply(normalize_bool_to_01)
-    df["Tracked Shipments"] = [
-        derive_tracked_shipments(it, tt) for it, tt in zip(df["IsTracked"], df["Tracking Type"])
-    ]
-    df["Tracking field"] = df["Tracking Type"].apply(to_str) + " - " + df["Tracked Shipments"].apply(to_str)
 
-    # Week from the first timestamp in Pickup Appointment Window
+    df["IsTracked"] = df["Tracked"].apply(normalize_bool_to_01)
+
+    df["Tracked Shipments"] = [
+        derive_tracked_shipments(it, tt)
+        for it, tt in zip(df["IsTracked"], df["Tracking Type"])
+    ]
+
+    df["Tracking field"] = (
+        df["Tracking Type"].apply(to_str) + " - " + df["Tracked Shipments"].apply(to_str)
+    )
+
+    # ---- Column K: Tracked (1/0) based on Tracking field ----
+    # Logic: if Tracking field is 'APP - Tracked', 'DIRECT - Tracked', or 'ELD - Tracked' -> 1, else -> 0
+    df["Tracked"] = df["Tracking field"].apply(derive_tracked_flag)
+
+    # ---- Week and Year from Pickup Appointment Window ----
     pickup_start_dt = df[pickup_col].apply(first_datetime_from_window)
     df["Week"] = pickup_start_dt.apply(iso_week_label)
+    df["Year"] = pickup_start_dt.apply(iso_year)
 
-    # Tracking Error update
+    # ---- Tracking Error update ----
     if "Tracking Error" not in df.columns:
         df["Tracking Error"] = ""
     mask_tracked_like = df["Tracked Shipments"].isin(["Tracked", "YMS Milestone"])
     df.loc[mask_tracked_like, "Tracking Error"] = "Tracked"
 
-    # Ensure output uses the exact requested header spelling
-    if "Pickup Appointement Window (UTC)" not in df.columns:
-        df["Pickup Appointement Window (UTC)"] = df[pickup_col]
-
-    # ---- Final output columns (Shipment Type REMOVED) ----
+    # ---- Final output columns ----
     desired_cols = [
-        "Sl. No","Tenant Name","Tenant ID","Carrier Name","P44 CARRIER ID","P44 Shipment ID",
-        "Bill of Lading","Order Number","Shipment ID","IsTracked","Tracked Shipments",
-        "Tracking Type","Tracking field","Tracking Method","Active Equipment ID","Historical Equipment ID",
-        "Pickup Name","Pickup City State","Pickup Country","Pickup Region","Week",
+        "Sl. No", "Tenant Name", "Tenant ID", "Carrier Name", "P44 CARRIER ID", "P44 Shipment ID",
+        "Bill of Lading", "Order Number", "Shipment ID", "IsTracked", "Tracked", "Tracked Shipments",
+        "Tracking Type", "Tracking field", "Tracking Method", "Active Equipment ID", "Historical Equipment ID",
+        "Pickup Name", "Pickup City State", "Pickup Country", "Pickup Region",
+        "Year", "Week",
         "Pickup Appointement Window (UTC)",
-        "Final Destination Name","Final Destination City State","Final Destination Country",
+        "Final Destination Name", "Final Destination City State", "Final Destination Country",
         "Delivery Appointement Window (UTC)",
-        "Shipment Created (UTC)","Tracking Window Start (UTC)","Tracking Window End (UTC)",
-        "Pickup Arrival Milestone (UTC)","Pickup Departure Milestone (UTC)",
-        "Final Destination Arrival Milestone (UTC)","Final Destination Departure Milestone (UTC)",
+        "Shipment Created (UTC)", "Tracking Window Start (UTC)", "Tracking Window End (UTC)",
+        "Pickup Arrival Milestone (UTC)", "Pickup Departure Milestone (UTC)",
+        "Final Destination Arrival Milestone (UTC)", "Final Destination Departure Milestone (UTC)",
         "# Of Milestones received / # Of Milestones expected",
-        "# Updates Received","# Updates Received < 10 mins",
-        "Nb Intervals Expected","Nb Intervals Observed",
-        "Final Status Reason","Tracking Error",
-        "Milestone Error 1","Milestone Error 2","Milestone Error 3",
-        "Attr1 Value","Attr2 Name","Attr2 Value","Attr3 Name","Attr3 Value",
-        "Attr4 Name","Attr4 Value","Attr5 Name","Attr5 Value",
+        "# Updates Received", "# Updates Received < 10 mins",
+        "Nb Intervals Expected", "Nb Intervals Observed",
+        "Final Status Reason", "Tracking Error",
+        "Milestone Error 1", "Milestone Error 2", "Milestone Error 3",
+        "Shipment Type",
+        "Attr2 Name", "Attr2 Value", "Attr3 Name", "Attr3 Value",
+        "Attr4 Name", "Attr4 Value", "Attr5 Name", "Attr5 Value",
         "Average Latency (min)"
     ]
 
-    # Create missing columns as blanks (so output always matches the requested schema)
+    # Create missing columns as blanks
     for c in desired_cols:
         if c not in df.columns:
             df[c] = ""
@@ -220,14 +290,18 @@ if raw_file:
     st.dataframe(out_df.head(50), use_container_width=True)
 
     st.download_button(
-        "Download Enriched Raw File (Reordered, No Shipment Type)",
+        "⬇️ Download Enriched Raw File",
         data=to_excel_bytes(out_df, sheet_name="Raw File"),
-        file_name="Raw_File_Enriched_Reordered_No_Shipment_Type.xlsx",
+        file_name="Raw_File_Enriched.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
     st.subheader("Quick checks")
+    st.write("Total rows:", len(out_df))
     st.write("Rows with Week blank:", int((out_df["Week"].apply(to_str) == "").sum()))
+    st.write("Rows where Tracked = 1:", int((out_df["Tracked"] == 1).sum()))
+    st.write("Rows where Tracked = 0:", int((out_df["Tracked"] == 0).sum()))
     st.write("Rows where Tracking Error forced to 'Tracked':", int(mask_tracked_like.sum()))
+
 else:
     st.info("Upload the Raw File to continue.")

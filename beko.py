@@ -264,7 +264,7 @@ if raw_file:
 
     # ---- Final output columns ----
     desired_cols = [
-        "Tenant Name", "Carrier Name", "P44 CARRIER ID", "P44 Shipment ID",
+        "Tenant Name", "Tenant ID", "Carrier Name", "P44 CARRIER ID", "P44 Shipment ID",
         "Bill of Lading", "Order Number", "Shipment ID", "IsTracked", "Tracked", "Tracked Shipments",
         "Connection Type", "Tracking field", "Tracking Method", "Active Equipment ID", "Historical Equipment ID",
         "Pickup Name", "Pickup City State", "Pickup Country", "Pickup Region",

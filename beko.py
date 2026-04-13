@@ -56,17 +56,17 @@ def derive_shipment_id(order_number, bill_of_lading):
     bol = to_str(bill_of_lading)
     return on if on != "" else bol
 
-def derive_tracked_shipments(is_tracked_01, tracking_type):
+def derive_tracked_shipments(is_tracked_01, connection_type):
     """
     Rules:
-      - Tracking Type in {ELD, APP, DIRECT}
+      - Connection Type in {ELD, APP, DIRECT}
           IsTracked=1 -> Tracked
           IsTracked=0 -> Untracked
-      - Tracking Type == Unknown
+      - Connection Type == Unknown
           IsTracked=1 -> YMS Milestone
           IsTracked=0 -> Untracked
     """
-    tt = to_str(tracking_type).upper()
+    tt = to_str(connection_type).upper()
     it = None if pd.isna(is_tracked_01) else int(is_tracked_01)
 
     if tt in ["ELD", "APP", "DIRECT"]:
@@ -148,7 +148,8 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="Raw File") -> bytes:
 # Handles minor spelling/casing differences in input files
 # -----------------------
 COLUMN_ALIASES = {
-    "Tracking Type": [
+    "Connection Type": [
+        "connection type", "connectiontype", "connection_type",
         "tracking type", "trackingtype", "tracking_type",
         "type of tracking", "tracking  type"
     ],
@@ -201,7 +202,7 @@ if raw_file:
     pickup_col = "Pickup Appointement Window (UTC)"
 
     # Required input columns
-    required = ["Order Number", "Bill of Lading", "Tracked", "Tracking Type", pickup_col]
+    required = ["Order Number", "Bill of Lading", "Tracked", "Connection Type", pickup_col]
     missing = [c for c in required if c not in df.columns]
     if missing:
         st.error(f"Raw file missing required columns: {missing}")
@@ -233,11 +234,11 @@ if raw_file:
 
     df["Tracked Shipments"] = [
         derive_tracked_shipments(it, tt)
-        for it, tt in zip(df["IsTracked"], df["Tracking Type"])
+        for it, tt in zip(df["IsTracked"], df["Connection Type"])
     ]
 
     df["Tracking field"] = (
-        df["Tracking Type"].apply(to_str) + " - " + df["Tracked Shipments"].apply(to_str)
+        df["Connection Type"].apply(to_str) + " - " + df["Tracked Shipments"].apply(to_str)
     )
 
     # ---- Column K: Tracked (1/0) based on Tracking field ----
@@ -259,7 +260,7 @@ if raw_file:
     desired_cols = [
         "Sl. No", "Tenant Name", "Tenant ID", "Carrier Name", "P44 CARRIER ID", "P44 Shipment ID",
         "Bill of Lading", "Order Number", "Shipment ID", "IsTracked", "Tracked", "Tracked Shipments",
-        "Tracking Type", "Tracking field", "Tracking Method", "Active Equipment ID", "Historical Equipment ID",
+        "Connection Type", "Tracking field", "Tracking Method", "Active Equipment ID", "Historical Equipment ID",
         "Pickup Name", "Pickup City State", "Pickup Country", "Pickup Region",
         "Year", "Week",
         "Pickup Appointement Window (UTC)",

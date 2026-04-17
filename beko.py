@@ -251,8 +251,11 @@ if raw_file:
     df["Year"] = pickup_start_dt.apply(iso_year)
 
     # ---- Tracking Error update ----
+    # FIX: Cast to object dtype first so string values can be assigned
+    # (column may be inferred as float64 when all values are NaN in the raw file)
     if "Tracking Error" not in df.columns:
         df["Tracking Error"] = ""
+    df["Tracking Error"] = df["Tracking Error"].astype(object)
     mask_tracked_like = df["Tracked Shipments"].isin(["Tracked", "YMS Milestone"])
     df.loc[mask_tracked_like, "Tracking Error"] = "Tracked"
 

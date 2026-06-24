@@ -113,10 +113,7 @@ def first_datetime_from_window(window_val):
     return pd.to_datetime(left, errors="coerce")
 
 def iso_week_label(dt_val):
-    """
-    ISO week numbering (Mon-Sun):
-      Returns 'Week XX' zero-padded.
-    """
+    """ISO week numbering (Mon-Sun): Returns 'Week XX' zero-padded."""
     if pd.isna(dt_val):
         return ""
     d = pd.to_datetime(dt_val, errors="coerce")
@@ -126,10 +123,7 @@ def iso_week_label(dt_val):
     return f"Week {wk:02d}"
 
 def iso_year(dt_val):
-    """
-    ISO year — matches ISO week (can differ from calendar year at year boundaries).
-    e.g. Dec 29 2025 belongs to ISO Week 01 of 2026.
-    """
+    """ISO year — matches ISO week (can differ from calendar year at year boundaries)."""
     if pd.isna(dt_val):
         return np.nan
     d = pd.to_datetime(dt_val, errors="coerce")
@@ -138,14 +132,28 @@ def iso_year(dt_val):
     return int(d.isocalendar().year)
 
 def to_excel_bytes(df: pd.DataFrame, sheet_name="Raw File") -> bytes:
+    """
+    FIX: Convert datetime columns to mm/dd/yyyy strings and replace all
+    NaT/NaN with empty strings before writing — prevents openpyxl
+    ValueError caused by mixed types in the same column.
+    """
     bio = BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl", datetime_format="mm/dd/yyyy") as writer:
+    df = df.copy()
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            # Format dates as mm/dd/yyyy strings; blank where NaT
+            df[col] = df[col].apply(
+                lambda x: x.strftime("%m/%d/%Y") if pd.notna(x) else ""
+            )
+        else:
+            # Replace any remaining NaN/NaT with empty string
+            df[col] = df[col].apply(lambda x: "" if pd.isna(x) else x)
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
     return bio.getvalue()
 
 # -----------------------
 # Column name normalizer
-# Handles minor spelling/casing differences in input files
 # -----------------------
 COLUMN_ALIASES = {
     "Connection Type": [
@@ -189,19 +197,16 @@ def normalize_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 if raw_file:
     df = pd.read_excel(raw_file)
 
-    # Normalize column names (handle spelling/casing variants)
+    # Normalize column names
     df, renamed = normalize_columns(df)
     if renamed:
         st.info(f"Auto-renamed columns to match expected schema: {renamed}")
 
-    # Show actual columns for debugging (collapsible)
     with st.expander("Columns detected in uploaded file"):
         st.write(df.columns.tolist())
 
-    # Pickup window column (after normalization, should be canonical name)
     pickup_col = "Pickup Appointement Window (UTC)"
 
-    # Required input columns
     required = ["Order Number", "Bill of Lading", "Tracked", "Connection Type", pickup_col]
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -214,7 +219,7 @@ if raw_file:
         if col in df.columns:
             df[col] = df[col].apply(to_numeric)
 
-    # ---- Force date columns to date-only (mm/dd/yyyy on export) ----
+    # ---- Force date columns to date-only ----
     date_cols = [
         "Shipment Created (UTC)",
         "Tracking Window Start (UTC)",
@@ -241,8 +246,6 @@ if raw_file:
         df["Connection Type"].apply(to_str) + " - " + df["Tracked Shipments"].apply(to_str)
     )
 
-    # ---- Column K: Tracked (1/0) based on Tracking field ----
-    # Logic: if Tracking field is 'APP - Tracked', 'DIRECT - Tracked', or 'ELD - Tracked' -> 1, else -> 0
     df["Tracked"] = df["Tracking field"].apply(derive_tracked_flag)
 
     # ---- Week and Year from Pickup Appointment Window ----
@@ -251,21 +254,18 @@ if raw_file:
     df["Year"] = pickup_start_dt.apply(iso_year)
 
     # ---- Tracking Error update ----
-    # FIX: Cast to object dtype first so string values can be assigned
-    # (column may be inferred as float64 when all values are NaN in the raw file)
     if "Tracking Error" not in df.columns:
         df["Tracking Error"] = ""
     df["Tracking Error"] = df["Tracking Error"].astype(object)
     mask_tracked_like = df["Tracked Shipments"].isin(["Tracked", "YMS Milestone"])
     df.loc[mask_tracked_like, "Tracking Error"] = "Tracked"
 
-    # Map "Attr1 Value" from raw file -> "Shipment Type" in output
+    # ---- Derived mappings ----
     if "Attr1 Value" in df.columns:
         df["Shipment Type"] = df["Attr1 Value"]
     elif "Shipment Type" not in df.columns:
         df["Shipment Type"] = ""
 
-    # Map "Customer Tenant Name" from raw file -> "Tenant Name" in output
     if "Customer Tenant Name" in df.columns:
         df["Tenant Name"] = df["Customer Tenant Name"]
     elif "Tenant Name" not in df.columns:
@@ -295,7 +295,6 @@ if raw_file:
         "Average Latency (min)"
     ]
 
-    # Create missing columns as blanks
     for c in desired_cols:
         if c not in df.columns:
             df[c] = ""

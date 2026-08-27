@@ -131,6 +131,15 @@ def iso_year(dt_val):
         return np.nan
     return int(d.isocalendar().year)
 
+def month_label(dt_val):
+    """Returns full month name from a datetime value e.g. 'January', 'February'."""
+    if pd.isna(dt_val):
+        return ""
+    d = pd.to_datetime(dt_val, errors="coerce")
+    if pd.isna(d):
+        return ""
+    return d.strftime("%B")  # Full month name
+
 def to_excel_bytes(df: pd.DataFrame, sheet_name="Raw File") -> bytes:
     """
     FIX: Convert datetime columns to mm/dd/yyyy strings and replace all
@@ -141,12 +150,10 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="Raw File") -> bytes:
     df = df.copy()
     for col in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[col]):
-            # Format dates as mm/dd/yyyy strings; blank where NaT
             df[col] = df[col].apply(
                 lambda x: x.strftime("%m/%d/%Y") if pd.notna(x) else ""
             )
         else:
-            # Replace any remaining NaN/NaT with empty string
             df[col] = df[col].apply(lambda x: "" if pd.isna(x) else x)
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
@@ -253,6 +260,13 @@ if raw_file:
     df["Week"] = pickup_start_dt.apply(iso_week_label)
     df["Year"] = pickup_start_dt.apply(iso_year)
 
+    # ---- Month from Shipment Created (UTC) ----
+    # NOTE: Shipment Created is already normalized to date-only via to_mmddyyyy above
+    if "Shipment Created (UTC)" in df.columns:
+        df["Month"] = df["Shipment Created (UTC)"].apply(month_label)
+    else:
+        df["Month"] = ""
+
     # ---- Tracking Error update ----
     if "Tracking Error" not in df.columns:
         df["Tracking Error"] = ""
@@ -277,7 +291,7 @@ if raw_file:
         "Bill of Lading", "Order Number", "Shipment ID", "IsTracked", "Tracked", "Tracked Shipments",
         "Connection Type", "Tracking field", "Tracking Method", "Active Equipment ID", "Historical Equipment ID",
         "Pickup Name", "Pickup City State", "Pickup Country", "Pickup Region",
-        "Year", "Week",
+        "Year", "Week", "Month",
         "Pickup Appointement Window (UTC)",
         "Final Destination Name", "Final Destination City State", "Final Destination Country",
         "Delivery Appointement Window (UTC)",
@@ -314,6 +328,7 @@ if raw_file:
     st.subheader("Quick checks")
     st.write("Total rows:", len(out_df))
     st.write("Rows with Week blank:", int((out_df["Week"].apply(to_str) == "").sum()))
+    st.write("Rows with Month blank:", int((out_df["Month"].apply(to_str) == "").sum()))
     st.write("Rows where Tracked = 1:", int((out_df["Tracked"] == 1).sum()))
     st.write("Rows where Tracked = 0:", int((out_df["Tracked"] == 0).sum()))
     st.write("Rows where Tracking Error forced to 'Tracked':", int(mask_tracked_like.sum()))
